@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ClickHouse ↔ Flat File Ingestion</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: Arial, sans-serif;
+      background: #f9f9f9;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      min-height: 100vh;
+    }
+    .container {
+      background: #fff;
+      width: 90%;
+      max-width: 800px;
+      margin: 40px 0;
+      padding: 20px 30px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    h1 { margin-top: 0; font-size: 1.8rem; text-align: center; }
+    label { display: block; margin: 10px 0 5px; font-weight: bold; }
+    select, input[type="text"], input[type="file"] {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    .form-group { margin-bottom: 15px; }
+    button {
+      padding: 10px 16px;
+      margin-top: 10px;
+      border: none;
+      border-radius: 4px;
+      background: #007bff;
+      color: #fff;
+      font-size: 1rem;
+      cursor: pointer;
+    }
+    button:hover { background: #0056b3; }
+    .section { margin-top: 30px; }
+    .inline { display: inline-block; width: auto; vertical-align: middle; }
+    pre {
+      background: #272c34;
+      color: #fff;
+      padding: 15px;
+      border-radius: 4px;
+      overflow-x: auto;
+      margin-top: 15px;
+      font-size: 0.9rem;
+      line-height: 1.4;
+    }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Bidirectional Ingestion App</h1>
+
+    <div class="form-group">
+      <label for="source">Select Data Source</label>
+      <select id="source" onchange="showConfigForm()">
+        <option value="">-- Select --</option>
+        <option value="ClickHouse">ClickHouse</option>
+        <option value="FlatFile">Flat File</option>
+      </select>
+    </div>
+
+    <!-- ClickHouse Section -->
+    <div id="clickhouse-form" class="section hidden">
+      <h2>ClickHouse Configuration</h2>
+      <form id="clickhouse-config-form" onsubmit="return false;">
+        <div class="form-group"><label>Host</label><input type="text" name="host" placeholder="e.g. localhost" /></div>
+        <div class="form-group"><label>Port</label><input type="text" name="port" placeholder="e.g. 8123" /></div>
+        <div class="form-group"><label>Database</label><input type="text" name="database" placeholder="e.g. default" /></div>
+        <div class="form-group"><label>User</label><input type="text" name="user" placeholder="e.g. default" /></div>
+        <div class="form-group"><label>JWT Token</label><input type="text" name="jwt" placeholder="(if required)" /></div>
+        <button onclick="clickhouseConnect()">Connect & Load Tables</button>
+      </form>
+
+      <div id="tables-section" class="section hidden">
+        <div class="form-group inline" style="width: 70%;">
+          <label>Select Table</label>
+          <select id="tables-list"></select>
+        </div>
+        <div class="form-group inline" style="width: 25%; margin-left: 5%;">
+          <label>&nbsp;</label>
+          <button onclick="loadClickhouseColumns()">Load Columns</button>
+        </div>
+      </div>
+
+      <pre id="clickhouse-columns" class="hidden"></pre>
+    </div>
+
+    <!-- Flat File Section -->
+    <div id="flatfile-form" class="section hidden">
+      <h2>Flat File Upload</h2>
+      <form id="flatfile-upload-form" enctype="multipart/form-data">
+        <div class="form-group"><label>Select File</label><input type="file" name="file" /></div>
+        <div class="form-group inline" style="width: 30%;"><label>Delimiter</label><input type="text" name="delimiter" value="," maxlength="1" /></div>
+        <div class="form-group inline" style="width: 30%; margin-left:5%;"><label>&nbsp;</label><button onclick="loadFlatfileSchema(event)">Load Schema</button></div>
+        <div class="form-group inline" style="width: 30%; margin-left:5%;"><label>&nbsp;</label><button onclick="countFlatfileRecords(event)">Count Records</button></div>
+      </form>
+
+      <pre id="flatfile-columns" class="hidden"></pre>
+      <pre id="flatfile-count" class="hidden"></pre>
+    </div>
+
+    <pre id="output" class="hidden"></pre>
+  </div>
+
+  <script>
+    function showConfigForm() {
+      const src = document.getElementById("source").value;
+      document.getElementById("clickhouse-form").classList.toggle("hidden", src!=="ClickHouse");
+      document.getElementById("flatfile-form").classList.toggle("hidden", src!=="FlatFile");
+      ["output","tables-section","clickhouse-columns","flatfile-columns","flatfile-count"].forEach(id =>
+        document.getElementById(id).classList.add("hidden")
+      );
+    }
+
+    async function clickhouseConnect() {
+      const form = document.getElementById('clickhouse-config-form');
+      const data = {
+        host: form.host.value, port: +form.port.value,
+        database: form.database.value, user: form.user.value,
+        jwt: form.jwt.value
+      };
+      try {
+        const res = await fetch('/api/clickhouse/tables',{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(data)
+        });
+        if(!res.ok) throw new Error(res.statusText);
+        const tables = await res.json();
+        const sel = document.getElementById('tables-list');
+        sel.innerHTML = tables.map(t=>`<option>${t}</option>`).join('');
+        document.getElementById('tables-section').classList.remove('hidden');
+      } catch(e){
+        showError(e);
+      }
+    }
+
+    async function loadClickhouseColumns(){
+      const form = document.getElementById('clickhouse-config-form');
+      const table = document.getElementById('tables-list').value;
+      const data = { host: form.host.value, port:+form.port.value, database: form.database.value, user: form.user.value, jwt: form.jwt.value };
+      try {
+        const res = await fetch(`/api/clickhouse/columns?tableName=${encodeURIComponent(table)}`, {
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(data)
+        });
+        if(!res.ok) throw new Error(res.statusText);
+        const cols = await res.json();
+        const pre = document.getElementById('clickhouse-columns');
+        pre.textContent = JSON.stringify(cols,null,2);
+        pre.classList.remove('hidden');
+      } catch(e){
+        showError(e);
+      }
+    }
+
+    async function loadFlatfileSchema(e){
+      e.preventDefault();
+      const f = document.querySelector('#flatfile-upload-form input[name="file"]').files[0];
+      const d = document.querySelector('#flatfile-upload-form input[name="delimiter"]').value;
+      const fd = new FormData(); fd.append('file',f); fd.append('delimiter',d);
+      try {
+        const res = await fetch('/api/flatfile/schema',{method:'POST',body:fd});
+        if(!res.ok) throw new Error(res.statusText);
+        const sch = await res.json();
+        const pre = document.getElementById('flatfile-columns');
+        pre.textContent = JSON.stringify(sch,null,2);
+        pre.classList.remove('hidden');
+      } catch(e){
+        showError(e);
+      }
+    }
+
+    async function countFlatfileRecords(e){
+      e.preventDefault();
+      const f = document.querySelector('#flatfile-upload-form input[name="file"]').files[0];
+      const d = document.querySelector('#flatfile-upload-form input[name="delimiter"]').value;
+      const fd = new FormData(); fd.append('file',f); fd.append('delimiter',d);
+      try {
+        const res = await fetch('/api/flatfile/count',{method:'POST',body:fd});
+        if(!res.ok) throw new Error(res.statusText);
+        const cnt = await res.text();
+        const pre = document.getElementById('flatfile-count');
+        pre.textContent = `Records: ${cnt}`;
+        pre.classList.remove('hidden');
+      } catch(e){
+        showError(e);
+      }
+    }
+
+    function showError(e){
+      const out = document.getElementById('output');
+      out.textContent = 'Error: ' + e.message;
+      out.classList.remove('hidden');
+    }
+  </script>
+</body>
+</html>
